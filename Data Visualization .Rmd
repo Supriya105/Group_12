@@ -1,0 +1,289 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(rvest)
+library(XML)
+library(tidytext)
+library(wordcloud)
+library(doMC)
+registerDoMC()
+set.seed(1234)
+```
+
+
+```{r}
+dataset_files <- c("movie", "rating", "link", "tag")
+suffix <- ".csv"
+
+for (f in dataset_files) {
+  path <- file.path("/Users/supriyamajjagi/Desktop/data", paste0(f, suffix))
+  assign(f, read_csv(path, progress = F))
+  print(paste(f, "object size is", format(object.size(get(f)),units="Mb")))
+}
+```
+
+
+```{r}
+glimpse(rating)
+```
+
+We have 24 million rows and 4 columns. It seems that only timestamp column need to be converted. We will create new data frame that we will work on and preserve the original data frame (treat it as read-only).
+
+```{r}
+ratings_df <- rating %>%
+  mutate(timestamp = as_datetime(timestamp))
+
+summary(ratings_df)
+```
+
+Ok, looks like there is no missing data. We can also see that the ratings range from 0.5 to 5 and that they are timestamped. Now, let’s look into the movies data frame.
+
+
+```{r}
+glimpse(movie)
+```
+
+
+There are over 40 thousand movies and 3 columns. Most of the movies have their debut year added to their names - we want to extract this into separate columns. Genres columns contains multiple categories per row - we want to have them separated into one category per row. We will deal with this later.
+
+
+```{r}
+movies_df <- movie %>%
+  # trim whitespaces
+  mutate(title = str_trim(title)) %>%
+  # split title to title, year
+  extract(title, c("title_tmp", "year"), regex = "^(.*) \\(([0-9 \\-]*)\\)$", remove = F) %>%
+  # for series take debut date
+  mutate(year = if_else(str_length(year) > 4, as.integer(str_split(year, "-", simplify = T)[1]), as.integer(year))) %>%
+  # replace title NA's with original title
+  mutate(title = if_else(is.na(title_tmp), title, title_tmp)) %>%
+  # drop title_tmp column
+  select(-title_tmp)  %>%
+  # generic function to turn (no genres listed) to NA
+  mutate(genres = if_else(genres == "(no genres listed)", `is.na<-`(genres), genres))
+```
+Here we extracted the movie debut year using extract() function from tidyr package. For the case of movie series where year has “yyyy-yyyy” format we take the first date. In the last line we replaced the string “(no genres listed)” with NA value to make further processing easier. There are also some warnings suggesting that missing values appeared. We’ll check that now.
+
+```{r}
+na_movies <- movies_df %>%
+  filter(is.na(title) | is.na(year))
+
+glimpse(na_movies)
+```
+
+Seems that warnings appeared, because some of the movies do not have their debut year. We will ignore those movies in further analysis as there aren’t many of them.
+
+```{r}
+summary(movies_df)
+```
+
+
+
+
+
+```{r}
+glimpse(tag)
+```
+Seems that only timestamp needs to be converted.
+
+```{r}
+tags_df <- tag %>%
+  mutate(timestamp = as_datetime(timestamp))
+
+summary(tags_df)
+```
+No missing values, we can continue to the links data frame.
+
+```{r}
+glimpse(link)
+```
+We have 40,000 rows with ids to imdb and tmdb websites. We will use them later for some web scraping.
+
+Ok, we are now done with data cleaning. Let’s go deeper into the data exploration.
+
+Data Exploration
+```{r}
+movies_per_year <- movies_df %>%
+  na.omit() %>% # omit missing values
+  select(movieId, year) %>% # select columns we need
+  group_by(year) %>% # group by year
+  summarise(count = n())  %>% # count movies per year
+  arrange(year)
+
+print(movies_per_year)
+```
+There are some years that are missing, probably there were no movies produced in the early years. We can easily fix missing values using complete() function from the tidyr package.
+
+```{r}
+movies_per_year <- movies_per_year %>%
+  complete(year = full_seq(year, 1), fill = list(count = 0))
+
+print(movies_per_year)
+```
+
+
+```{r}
+movies_per_year %>%
+  ggplot(aes(x = year, y = count)) +
+  geom_line(color="blue")
+```
+
+We can see an exponential growth of the movie business and a sudden drop in 2016. The latter is caused by the fact that the data is collected until October 2016 so we don’t have the full data on this year. As for the former, perhaps it was somewhat linked to the beginning of the information era. Growing popularity of the Internet must have had a positive impact on the demand for movies. That is certainly something worthy of further analysis.
+
+
+We know how many movies were produced, but can we check what genres were popular? We might expect that some events in history might have influenced the movie creators to produce specific genres. First we will check what genres are the most popular in general.
+```{r}
+genres_df <- movies_df %>%
+  separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarise(number = n()) %>%
+  arrange(desc(number))
+
+print(genres_df)
+```
+
+Dramas and comedies are definitely the most popular genres.
+
+```{r}
+genres_popularity <- movies_df %>%
+  na.omit() %>% # omit missing values
+  select(movieId, year, genres) %>% # select columns we are interested in
+  separate_rows(genres, sep = "\\|") %>% # separate genres into rows
+  mutate(genres = as.factor(genres)) %>% # turn genres in factors
+  group_by(year, genres) %>% # group data by year and genre
+  summarise(number = n()) %>% # count
+  complete(year = full_seq(year, 1), genres, fill = list(number = 0)) # add missing years/genres
+```
+
+
+
+```{r}
+genres_popularity %>%
+  filter(year > 1930) %>%
+  filter(genres %in% c("War", "Sci-Fi", "Animation", "Western")) %>%
+  ggplot(aes(x = year, y = number)) +
+    geom_line(aes(color=genres)) + 
+    scale_fill_brewer(palette = "Paired")
+```
+Here we have some interesting observations. First we can notice a rapid growth of sci-fi movies shortly after 1969, the year of the first Moon landing. Secondly, we notice high number of westerns in 1950s and 1960s that was the time when westerns popularity was peaking. Next, we can see the rise of popularity of animated movies, the most probable reason might be the computer animation technology advancement which made the production much easier. War movies were popular around the time when big military conflicts occured - World War II, Vietnam War and most recently War in Afghanistan and Iraq. It’s interesting to see how the world of cinematography reflected the state of the real world.
+
+
+```{r}
+genres_tags <- movies_df %>%
+  na.omit() %>%
+  select(movieId, year, genres) %>%
+  separate_rows(genres, sep = "\\|") %>%
+  inner_join(tags_df, by = "movieId") %>%
+  select(genres, tag) %>%
+  group_by(genres) %>%
+  nest()
+```
+
+
+Action
+```{r}
+genre<-"Action"
+genre_words <- genres_tags %>%
+  filter(genres == genre) %>%
+  unnest() %>%
+  mutate(tag = str_to_lower(tag, "en")) %>%
+  anti_join(tibble(tag=c(tolower(genre)))) %>%
+  count(tag)
+
+  wordcloud(genre_words$tag, genre_words$n, max.words = 50, colors=brewer.pal(8, "Dark2"))
+```
+
+Comedy
+
+```{r}
+genre<-"Comedy"
+genre_words <- genres_tags %>%
+  filter(genres == genre) %>%
+  unnest() %>%
+  mutate(tag = str_to_lower(tag, "en")) %>%
+  anti_join(tibble(tag=c(tolower(genre)))) %>%
+  count(tag)
+
+  wordcloud(genre_words$tag, genre_words$n, max.words = 50, colors=brewer.pal(16, "Dark2"))
+```
+
+
+```{r}
+avg_rating <- ratings_df %>%
+  inner_join(movies_df, by = "movieId") %>%
+  na.omit() %>%
+  select(title, rating, year) %>%
+  group_by(title, year) %>%
+  summarise(count = n(), mean = mean(rating), min = min(rating), max = max(rating)) %>%
+  ungroup() %>%
+  arrange(desc(mean))
+
+print(avg_rating)
+```
+
+```{r}
+# R = average for the movie (mean) = (Rating)
+# v = number of votes for the movie = (votes)
+# m = minimum votes required to be listed in the Top 250
+# C = the mean vote across the whole report
+weighted_rating <- function(R, v, m, C) {
+  return (v/(v+m))*R + (m/(v+m))*C
+}
+
+avg_rating <- avg_rating %>%
+  mutate(wr = weighted_rating(mean, count, 500, mean(mean))) %>%
+  arrange(desc(wr)) %>%
+  select(title, year, count, mean, wr)
+
+print(avg_rating)
+```
+That’s better. Movies with more good reviews got higher score. Now let’s findthe best movie for every decade since the beginning of cinematography.
+
+
+```{r}
+# find best movie of a decade based on score
+# heavily dependent on the number of reviews
+best_per_decade <- avg_rating %>%
+  mutate(decade = year  %/% 10 * 10) %>%
+  arrange(year, desc(wr)) %>%
+  group_by(decade) %>%
+  summarise(title = first(title), wr = first(wr), mean = first(mean), count = first(count))
+print(best_per_decade)
+```
+
+Here we can notice the disadvantage of weighted ratings - low score for old movies. That’s not necessarily caused by movies quality, rather small number of viewers.
+
+
+```{r}
+genres_rating <- movies_df %>%
+  na.omit() %>%
+  select(movieId, year, genres) %>%
+  inner_join(ratings_df, by = "movieId") %>%
+  select(-timestamp, -userId) %>%
+  mutate(decade = year  %/% 10 * 10) %>%
+  separate_rows(genres, sep = "\\|") %>%
+  group_by(year, genres) %>%
+  summarise(count = n(), avg_rating = mean(rating)) %>%
+  ungroup() %>%
+  mutate(wr = weighted_rating(mean, count, 5000, mean(mean))) %>%
+  arrange(year)
+```
+
+
+
+```{r}
+genres_rating %>%
+  filter(genres %in% c("Action", "Romance", "Sci-Fi", "Western")) %>%
+  ggplot(aes(x = year, y = wr)) +
+    geom_line(aes(group=genres, color=genres)) +
+    geom_smooth(aes(group=genres, color=genres)) +
+    facet_wrap(~genres)
+```
+
+It seems that most of the movie genres are actually getting better and better. That is also influenced by the fact that more movies are produced.
